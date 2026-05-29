@@ -3,6 +3,7 @@ import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterPatientDto } from './dto/register-patient.dto';
 import { RecoverPatientDto } from './dto/recover-patient.dto';
+import { ResetPatientPasswordDto } from './dto/reset-patient-password.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -21,6 +22,11 @@ export class AuthController {
   @Post('paciente/recover')
   recoverPatient(@Body() dto: RecoverPatientDto) {
     return this.authService.recoverPatientByDni(dto.dni);
+  }
+
+  @Post('paciente/reset-password')
+  resetPatientPassword(@Body() dto: ResetPatientPasswordDto) {
+    return this.authService.resetPatientPasswordByDni(dto.dni, dto.password);
   }
 }
 

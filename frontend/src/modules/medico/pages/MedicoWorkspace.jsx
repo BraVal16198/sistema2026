@@ -1,7 +1,8 @@
 import { Activity, CalendarDays, FileText, LogOut, Stethoscope, Users } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useAppMessage } from '../../../context/AppMessageContext'
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000'
+import { apiFetch } from '../../../lib/api'
+import { getTodayIso } from '../../../lib/session'
 
 const NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard', icon: Activity },
@@ -19,67 +20,17 @@ const MEDICO_PROFILES = [
 
 const BLOOD_TYPES = ['O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-']
 
-const BASE_DATA = {
-  'juan-perez': {
-    appointments: [
-      { id: 'a1', date: '2026-04-30', hour: '09:00', patient: 'María García', dni: '45678901', status: 'Confirmada', type: 'Consulta General' },
-      { id: 'a2', date: '2026-04-30', hour: '10:30', patient: 'Carlos Ruiz', dni: '78901234', status: 'Confirmada', type: 'Control' },
-      { id: 'a3', date: '2026-04-30', hour: '14:00', patient: 'Ana López', dni: '56789012', status: 'Pendiente', type: 'Primera Vez' },
-      { id: 'a4', date: '2026-05-01', hour: '11:00', patient: 'Lucía Martín', dni: '89012345', status: 'Confirmada', type: 'Seguimiento' },
-    ],
-    pacientesItems: [
-      { dni: '45678901', fullName: 'María García Pérez', firstName: 'María', paternalLastName: 'García', maternalLastName: 'Pérez', age: '35 años', birthDate: '1990-04-12', phone: '987654321', lastVisit: '02 Abr 2026' },
-      { dni: '78901234', fullName: 'Carlos Ruiz López', firstName: 'Carlos', paternalLastName: 'Ruiz', maternalLastName: 'López', age: '42 años', birthDate: '1983-08-23', phone: '987654322', lastVisit: '28 Mar 2026' },
-      { dni: '56789012', fullName: 'Ana López Torres', firstName: 'Ana', paternalLastName: 'López', maternalLastName: 'Torres', age: '28 años', birthDate: '1997-01-16', phone: '987654323', lastVisit: '15 Mar 2026' },
-    ],
-    clinicalRecords: {
-      '45678901': { motivo: 'Control de presión arterial', diagnostico: 'Hipertensión leve', tratamiento: 'Enalapril 10mg', examenes: 'PA 140/90', observaciones: 'Control mensual', alergias: 'Penicilina', medicacionActual: 'Enalapril 10mg' },
-      '78901234': { motivo: 'Dolor de cabeza frecuente', diagnostico: 'Migraña', tratamiento: 'Ibuprofeno', examenes: 'Neurológico normal', observaciones: 'Evitar estrés', alergias: 'Ninguna', medicacionActual: 'Ibuprofeno' },
-      '56789012': { motivo: 'Primera evaluación', diagnostico: 'En evaluación', tratamiento: 'Pendiente', examenes: 'Pendiente', observaciones: 'Solicitar laboratorio', alergias: 'Ninguna', medicacionActual: 'Ninguna' },
-    },
-  },
-  'ana-torres': {
-    appointments: [
-      { id: 'b1', date: '2026-04-30', hour: '11:00', patient: 'Ana López', dni: '56789012', status: 'Confirmada', type: 'Cardiología' },
-      { id: 'b2', date: '2026-04-30', hour: '13:00', patient: 'Lucía Martín', dni: '89012345', status: 'Pendiente', type: 'Control' },
-    ],
-    pacientesItems: [
-      { dni: '56789012', fullName: 'Ana López Torres', firstName: 'Ana', paternalLastName: 'López', maternalLastName: 'Torres', age: '28 años', birthDate: '1997-01-16', phone: '987654323', lastVisit: '15 Mar 2026' },
-      { dni: '89012345', fullName: 'Lucía Martín Cruz', firstName: 'Lucía', paternalLastName: 'Martín', maternalLastName: 'Cruz', age: '31 años', birthDate: '1994-09-09', phone: '987654325', lastVisit: '05 Mar 2026' },
-    ],
-    clinicalRecords: {},
-  },
-  'carlos-ruiz': {
-    appointments: [
-      { id: 'c1', date: '2026-04-30', hour: '16:00', patient: 'Pedro Sánchez', dni: '67890123', status: 'Confirmada', type: 'Pediatría' },
-      { id: 'c2', date: '2026-04-30', hour: '17:00', patient: 'Sofía Ramos', dni: '34567890', status: 'Pendiente', type: 'Control' },
-    ],
-    pacientesItems: [
-      { dni: '67890123', fullName: 'Pedro Sánchez Vila', firstName: 'Pedro', paternalLastName: 'Sánchez', maternalLastName: 'Vila', age: '55 años', birthDate: '1970-11-20', phone: '987654324', lastVisit: '10 Mar 2026' },
-      { dni: '34567890', fullName: 'Sofía Ramos Pérez', firstName: 'Sofía', paternalLastName: 'Ramos', maternalLastName: 'Pérez', age: '9 años', birthDate: '2016-06-30', phone: '987654326', lastVisit: '25 Mar 2026' },
-    ],
-    clinicalRecords: {},
-  },
-  'maria-lopez': {
-    appointments: [
-      { id: 'd1', date: '2026-04-30', hour: '08:30', patient: 'Jose Rojas', dni: '70052095', status: 'Confirmada', type: 'Traumatología' },
-      { id: 'd2', date: '2026-04-30', hour: '10:00', patient: 'Ana Vera', dni: '70052094', status: 'Pendiente', type: 'Control' },
-    ],
-    pacientesItems: [
-      { dni: '70052095', fullName: 'Jose Rojas Medina', firstName: 'Jose', paternalLastName: 'Rojas', maternalLastName: 'Medina', age: '24 años', birthDate: '2001-05-18', phone: '987456127', lastVisit: '30 Abr 2026' },
-      { dni: '70052094', fullName: 'Ana Vera Condori', firstName: 'Ana', paternalLastName: 'Vera', maternalLastName: 'Condori', age: '30 años', birthDate: '1995-11-02', phone: '987456126', lastVisit: '30 Abr 2026' },
-    ],
-    clinicalRecords: {},
-  },
-}
-
 function MedicoWorkspace({ onLogout }) {
   const { showMessage } = useAppMessage()
   const [activeView, setActiveView] = useState('dashboard')
   const [selectedProfileKey, setSelectedProfileKey] = useState('')
   const [enteredProfileKey, setEnteredProfileKey] = useState('')
-  const [medicoData, setMedicoData] = useState(BASE_DATA['juan-perez'])
-  const [agendaDate, setAgendaDate] = useState('2026-04-30')
+  const [medicoData, setMedicoData] = useState({
+    appointments: [],
+    pacientesItems: [],
+    clinicalRecords: {},
+  })
+  const [agendaDate, setAgendaDate] = useState(getTodayIso)
   const [dniSearch, setDniSearch] = useState('')
   const [selectedAppointmentId, setSelectedAppointmentId] = useState('')
   const [recordForm, setRecordForm] = useState({
@@ -103,7 +54,7 @@ function MedicoWorkspace({ onLogout }) {
 
   const selectedProfile = MEDICO_PROFILES.find((item) => item.key === selectedProfileKey) ?? null
   const enteredProfile = MEDICO_PROFILES.find((item) => item.key === enteredProfileKey) ?? null
-  const data = medicoData ?? BASE_DATA['juan-perez']
+  const data = medicoData
 
   const citasDelDia = data.appointments
   const citasRealizadas = citasDelDia.filter((item) => item.status === 'Confirmada' || item.status === 'Completada')
@@ -123,7 +74,7 @@ function MedicoWorkspace({ onLogout }) {
         specialty: profile.specialty,
         date,
       })
-      const response = await fetch(`${API_URL}/patient/medico/overview?${params.toString()}`)
+      const response = await apiFetch(`/patient/medico/overview?${params.toString()}`)
       if (!response.ok) throw new Error()
       const payload = await response.json()
       setMedicoData({
@@ -191,7 +142,7 @@ function MedicoWorkspace({ onLogout }) {
       return
     }
     try {
-      const response = await fetch(`${API_URL}/patient/history/by-dni/${recordForm.dni}`, {
+      const response = await apiFetch(`/patient/history/by-dni/${recordForm.dni}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -226,7 +177,7 @@ function MedicoWorkspace({ onLogout }) {
   const handleMarcarCita = async (status) => {
     if (!selectedAppointmentId) return
     try {
-      const response = await fetch(`${API_URL}/patient/appointments/${selectedAppointmentId}/update`, {
+      const response = await apiFetch(`/patient/appointments/${selectedAppointmentId}/update`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status }),

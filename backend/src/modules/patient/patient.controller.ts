@@ -8,6 +8,11 @@ import { PatientService } from './patient.service';
 export class PatientController {
   constructor(private readonly patientService: PatientService) {}
 
+  @Get('catalog')
+  getCatalog() {
+    return this.patientService.getCatalog();
+  }
+
   @Get('portal/:username/state')
   getState(@Param('username') username: string) {
     return this.patientService.getState(username);

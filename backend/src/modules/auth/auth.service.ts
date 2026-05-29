@@ -137,5 +137,33 @@ export class AuthService {
       paciente: profile.fullName,
     };
   }
+
+  async resetPatientPasswordByDni(dni: string, password: string) {
+    const normalizedDni = dni.trim();
+    const newPassword = password.trim();
+
+    if (newPassword.length < 4) {
+      throw new BadRequestException('La contraseña debe tener al menos 4 caracteres');
+    }
+
+    const profile = await this.profileRepository.findOne({ where: { dni: normalizedDni } });
+    if (!profile) {
+      throw new NotFoundException('No existe una cuenta asociada a ese DNI');
+    }
+
+    const user = await this.usersService.findByUsername(profile.username);
+    if (!user || user.role !== UserRole.PACIENTE) {
+      throw new NotFoundException('No existe un usuario paciente asociado a ese DNI');
+    }
+
+    user.passwordHash = await bcrypt.hash(newPassword, 10);
+    await this.usersRepository.save(user);
+
+    return {
+      message: 'Contraseña restablecida correctamente',
+      username: user.username,
+      paciente: profile.fullName,
+    };
+  }
 }
 

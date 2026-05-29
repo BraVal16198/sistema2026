@@ -15,7 +15,14 @@ import { useEffect, useMemo, useState } from 'react'
 import { jsPDF } from 'jspdf'
 import { useAppMessage } from '../../../context/AppMessageContext'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000'
+import { apiFetch } from '../../../lib/api'
+import {
+  applyCitasFromPayload,
+  getTodayIso,
+  isPastIsoDate,
+  isUpcomingAppointment,
+  splitAppointments,
+} from '../../../lib/appointmentDates'
 
 const profileSnapshotKey = (username) =>
   `pacienteProfileSnapshot:${String(username ?? '').trim().toLowerCase()}`
@@ -67,10 +74,10 @@ const proximasCitas = [
 ]
 
 const medicosEspecialidades = [
-  { value: 'juan-perez-medicina-general', label: 'Dr. Juan Pérez - Medicina General' },
-  { value: 'ana-torres-cardiologia', label: 'Dra. Ana Torres - Cardiología' },
-  { value: 'carlos-ruiz-pediatria', label: 'Dr. Carlos Ruiz - Pediatría' },
-  { value: 'maria-lopez-traumatologia', label: 'Dra. María López - Traumatología' },
+  { value: 'Dr. Juan Pérez - Medicina General', label: 'Dr. Juan Pérez - Medicina General' },
+  { value: 'Dra. Ana Torres - Cardiología', label: 'Dra. Ana Torres - Cardiología' },
+  { value: 'Dr. Carlos Ruiz - Pediatría', label: 'Dr. Carlos Ruiz - Pediatría' },
+  { value: 'Dra. María López - Traumatología', label: 'Dra. María López - Traumatología' },
 ]
 
 const horariosCitas = [
@@ -192,6 +199,7 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
     metodoPago: '',
   })
   const [proximasCitasState, setProximasCitasState] = useState([])
+  const [citasAnterioresState, setCitasAnterioresState] = useState([])
   const [pagosPendientesState, setPagosPendientesState] = useState([])
   const [pagosHistorialState, setPagosHistorialState] = useState([])
   const [historialConsultasState, setHistorialConsultasState] = useState([])
@@ -285,7 +293,7 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
       return
     }
     setProfileState(payload.profile ?? null)
-    setProximasCitasState(Array.isArray(payload.proximasCitas) ? payload.proximasCitas : [])
+    applyCitasFromPayload(payload, setProximasCitasState, setCitasAnterioresState)
     setHistorialConsultasState(
       Array.isArray(payload.historialConsultas) ? payload.historialConsultas : [],
     )
@@ -297,17 +305,20 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
     setPagosHistorialState(Array.isArray(payload.pagosHistorial) ? payload.pagosHistorial : [])
   }
 
-  const totalPagado = pagosHistorialState.reduce((acc, item) => acc + Number(item.monto.replace('S/ ', '')), 0)
+  const totalPagado = pagosHistorialState.reduce((acc, item) => {
+    const raw = item.monto
+    if (typeof raw === 'number') return acc + raw
+    return acc + Number(String(raw).replace(/[^\d.]/g, '') || 0)
+  }, 0)
   const citasAnterioresDynamic = useMemo(() => {
-    return historialConsultasState.slice(0, 5).map((item) => {
-      const [doctorName = item.doctor ?? '', specialty = ''] = String(item.doctor ?? '').split(' - ')
-      return {
-        doctor: doctorName || item.doctor || 'Sin doctor',
-        specialty: specialty || item.specialty || 'Sin especialidad',
-        date: item.date || '--',
-      }
-    })
-  }, [historialConsultasState])
+    return citasAnterioresState.map((item) => ({
+      doctor: item.doctor || 'Sin doctor',
+      specialty: item.specialty || 'Sin especialidad',
+      date: item.date || '--',
+      status: item.status || '',
+      time: item.time || '',
+    }))
+  }, [citasAnterioresState])
 
   const totalPendiente = pagosPendientesState.reduce((acc, item) => acc + pendingPaymentMonto(item), 0)
   const totalGastado = totalPagado + totalPendiente
@@ -324,7 +335,7 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
     },
     {
       label: 'Consultas Totales',
-      value: String(historialConsultasState.length + proximasCitasState.length),
+      value: String(historialConsultasState.length + proximasCitasState.length + citasAnterioresState.length),
       color: 'bg-green-500',
       icon: Stethoscope,
     },
@@ -336,7 +347,7 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
     },
     {
       label: 'Última Consulta',
-      value: historialConsultasState[0]?.date ?? 'Sin historial',
+      value: citasAnterioresState[0]?.date ?? historialConsultasState[0]?.date ?? 'Sin historial',
       color: 'bg-purple-500',
       icon: FileText,
     },
@@ -345,6 +356,7 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
   useEffect(() => {
     if (!isDemoPaciente) {
       setProximasCitasState([])
+      setCitasAnterioresState([])
       setHistorialConsultasState([])
       setPagosHistorialState([])
       setPagosPendientesState([])
@@ -355,7 +367,13 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
     if (saved) {
       try {
         const parsed = JSON.parse(saved)
-        setProximasCitasState(Array.isArray(parsed.proximasCitas) ? parsed.proximasCitas : [])
+        const allDemo = [
+          ...(Array.isArray(parsed.proximasCitas) ? parsed.proximasCitas : []),
+          ...(Array.isArray(parsed.citasAnteriores) ? parsed.citasAnteriores : []),
+        ]
+        const demoSplit = splitAppointments(allDemo.length ? allDemo : proximasCitas)
+        setProximasCitasState(demoSplit.upcoming)
+        setCitasAnterioresState(demoSplit.past)
         setHistorialConsultasState(
           Array.isArray(parsed.historialConsultas)
             ? parsed.historialConsultas
@@ -375,17 +393,21 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
       }
     }
 
-    setProximasCitasState(proximasCitas)
+    const demoSplit = splitAppointments(proximasCitas)
+    setProximasCitasState(demoSplit.upcoming)
+    setCitasAnterioresState(demoSplit.past)
     setHistorialConsultasState(historialDemo?.consultas ?? [])
     setPagosHistorialState(BASE_PAGOS_HISTORIAL)
     setPagosPendientesState([])
   }, [currentUsername, isDemoPaciente, stateStorageKey])
 
   useEffect(() => {
+    if (!isDemoPaciente) return
     localStorage.setItem(
       stateStorageKey,
       JSON.stringify({
         proximasCitas: proximasCitasState,
+        citasAnteriores: citasAnterioresState,
         historialConsultas: historialConsultasState,
         pagosHistorial: pagosHistorialState,
         pagosPendientes: pagosPendientesState,
@@ -393,9 +415,11 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
     )
   }, [
     historialConsultasState,
+    isDemoPaciente,
     pagosHistorialState,
     pagosPendientesState,
     proximasCitasState,
+    citasAnterioresState,
     stateStorageKey,
   ])
 
@@ -405,7 +429,7 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
 
     const fetchState = async () => {
       try {
-        const response = await fetch(`${API_URL}/patient/portal/${encodeURIComponent(currentUsername)}/state`, {
+        const response = await apiFetch(`/patient/portal/${encodeURIComponent(currentUsername)}/state`, {
           signal: controller.signal,
         })
         if (!response.ok) return
@@ -436,7 +460,9 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
 
       setProximasCitasState((prev) => {
         const filtered = prev.filter(
-          (item) => !(item.holdExpiresAt && item.paymentStatus === 'PENDIENTE_PAGO' && now >= item.holdExpiresAt),
+          (item) =>
+            isUpcomingAppointment(item) &&
+            !(item.holdExpiresAt && item.paymentStatus === 'PENDIENTE_PAGO' && now >= item.holdExpiresAt),
         )
 
         if (filtered.length !== prev.length) {
@@ -488,8 +514,13 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
       return
     }
 
+    if (isPastIsoDate(fecha)) {
+      showMessage('La fecha de la cita no puede ser anterior a hoy.', { variant: 'warning' })
+      return
+    }
+
     try {
-      const response = await fetch(`${API_URL}/patient/portal/${encodeURIComponent(currentUsername)}/citas`, {
+      const response = await apiFetch(`/patient/portal/${encodeURIComponent(currentUsername)}/citas`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -603,8 +634,8 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
     if (!pago) return
 
     try {
-      const response = await fetch(
-        `${API_URL}/patient/portal/${encodeURIComponent(currentUsername)}/pagos/${encodeURIComponent(pago.id)}/pagar`,
+      const response = await apiFetch(
+        `/patient/portal/${encodeURIComponent(currentUsername)}/pagos/${encodeURIComponent(pago.id)}/pagar`,
         { method: 'POST' },
       )
       if (!response.ok) throw new Error()
@@ -618,8 +649,8 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
 
   const handleCancelarCita = async (citaId) => {
     try {
-      const response = await fetch(
-        `${API_URL}/patient/portal/${encodeURIComponent(currentUsername)}/citas/${encodeURIComponent(citaId)}`,
+      const response = await apiFetch(
+        `/patient/portal/${encodeURIComponent(currentUsername)}/citas/${encodeURIComponent(citaId)}`,
         { method: 'DELETE' },
       )
       if (!response.ok) throw new Error()
@@ -809,6 +840,7 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
                   Fecha
                   <input
                     type="date"
+                    min={getTodayIso()}
                     value={nuevaCita.fecha}
                     onChange={(event) => onChangeNuevaCita('fecha', event.target.value)}
                     className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-normal"
@@ -914,9 +946,9 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
               <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
                 <h3 className="text-2xl font-semibold">Últimas Consultas</h3>
                 <div className="mt-3 space-y-2">
-                  {historialConsultasState.slice(0, 3).map((item) => (
+                  {historialConsultasState.slice(0, 3).map((item, index) => (
                     <div
-                      key={`${item.doctor}-${item.date}`}
+                      key={item.id ?? `${item.doctor}-${item.date}-${index}`}
                       className="flex items-center justify-between rounded-lg bg-[#f5f6f9] px-4 py-3"
                     >
                       <div className="flex items-center gap-3">
@@ -941,16 +973,25 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
               <article>
                 <h3 className="mb-2 text-2xl font-semibold">Próximas Citas</h3>
                 <div className="space-y-3">
+                  {proximasCitasState.length === 0 ? (
+                    <p className="rounded-xl border border-dashed border-slate-300 bg-white p-6 text-center text-slate-500">
+                      No tienes citas programadas. Solicita una nueva cita con el botón superior.
+                    </p>
+                  ) : null}
                   {proximasCitasState.map((item, index) => (
-                    <div key={item.id ?? item.date} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                      <div className={`mb-2 flex items-center justify-between border-l-4 pl-3 ${index === 0 ? 'border-blue-500' : 'border-blue-500'}`}>
+                    <div key={item.id ?? `${item.date}-${index}`} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                      <div className="mb-2 flex items-center justify-between border-l-4 border-blue-500 pl-3">
                         <div className="flex items-center gap-2">
                           <CalendarDays className="h-4 w-4 text-blue-500" />
                           <p className="text-base font-semibold">{item.date}</p>
                         </div>
                         <span
                           className={`rounded-full px-2 py-0.5 text-xs ${
-                            item.status === 'Confirmada' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+                            item.status === 'Confirmada'
+                              ? 'bg-emerald-100 text-emerald-700'
+                              : item.status === 'Pendiente'
+                                ? 'bg-amber-100 text-amber-700'
+                                : 'bg-slate-100 text-slate-700'
                           }`}
                         >
                           {item.status}
@@ -963,18 +1004,20 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
                         <p>{item.specialty}</p>
                         <p className="col-span-2 text-slate-500">{item.reason}</p>
                       </div>
-                      <div className="mt-3 flex gap-2 border-t border-slate-200 pt-2">
-                        <button type="button" className="rounded bg-[#f0f1f4] px-3 py-1 text-sm font-semibold">
-                          Reprogramar
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleCancelarCita(item.id)}
-                          className="px-3 py-1 text-sm font-semibold"
-                        >
-                          Cancelar
-                        </button>
-                      </div>
+                      {item.status !== 'Completada' && item.status !== 'Cancelada' ? (
+                        <div className="mt-3 flex gap-2 border-t border-slate-200 pt-2">
+                          <button type="button" className="rounded bg-[#f0f1f4] px-3 py-1 text-sm font-semibold">
+                            Reprogramar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleCancelarCita(item.id)}
+                            className="px-3 py-1 text-sm font-semibold"
+                          >
+                            Cancelar
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -982,15 +1025,26 @@ function PacienteWorkspace({ onLogout, portalUsername }) {
 
               <article>
                 <h3 className="mb-2 text-2xl font-semibold">Citas Anteriores</h3>
-                <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                  {citasAnterioresDynamic.map((item) => (
-                    <div key={`${item.doctor}-${item.date}`} className="rounded bg-[#f5f6f9] px-3 py-2">
-                      <div className="flex items-center justify-between">
+                <div className="space-y-2 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                  {citasAnterioresDynamic.length === 0 ? (
+                    <p className="text-center text-sm text-slate-500">Aún no hay citas pasadas registradas.</p>
+                  ) : null}
+                  {citasAnterioresDynamic.map((item, idx) => (
+                    <div key={`${item.doctor}-${item.date}-${idx}`} className="rounded bg-[#f5f6f9] px-3 py-2">
+                      <div className="flex items-center justify-between gap-2">
                         <div>
                           <p className="font-semibold">{item.doctor}</p>
                           <p className="text-sm text-slate-500">{item.specialty}</p>
+                          {item.time ? <p className="text-xs text-slate-400">{item.time}</p> : null}
                         </div>
-                        <p className="text-sm text-slate-500">{item.date}</p>
+                        <div className="text-right">
+                          <p className="text-sm text-slate-500">{item.date}</p>
+                          {item.status ? (
+                            <span className="mt-1 inline-block rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-600">
+                              {item.status}
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
                   ))}

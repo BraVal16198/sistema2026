@@ -14,7 +14,16 @@ import { jsPDF } from 'jspdf'
 import { useEffect, useMemo, useState } from 'react'
 import { useAppMessage } from '../../../context/AppMessageContext'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000'
+import { apiFetch } from '../../../lib/api'
+import {
+  formatLongDateEs,
+  getTodayIso,
+  isPastIsoDate,
+  isTodayAppointmentDate,
+  isUpcomingAppointment,
+  splitAppointments,
+} from '../../../lib/appointmentDates'
+import { clearSession } from '../../../lib/session'
 
 const NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard', icon: Activity },
@@ -37,12 +46,6 @@ const pacientesItems = [
   { dni: '56789012', fullName: 'Ana López Torres', age: '28 años', phone: '987654323', lastVisit: '15 Mar 2026' },
   { dni: '67890123', fullName: 'Pedro Sánchez Vila', age: '55 años', phone: '987654324', lastVisit: '10 Mar 2026' },
   { dni: '89012345', fullName: 'Lucía Martín Cruz', age: '31 años', phone: '987654325', lastVisit: '05 Mar 2026' },
-]
-
-const agendaCalendarItems = [
-  { patient: 'Juan Pérez', specialty: 'Medicina General' },
-  { patient: 'Ana Torres', specialty: 'Cardiología' },
-  { patient: 'Carlos Ruiz', specialty: 'Pediatría' },
 ]
 
 const agendaItems = [
@@ -180,7 +183,7 @@ const statsReportes = [
   { label: 'Total Pacientes Registrados', value: '1,248', extra: '+12% vs mes anterior', color: 'bg-blue-500', icon: Users },
   { label: 'Citas Realizadas (Mes)', value: '158', extra: '-13% vs mes anterior', color: 'bg-green-500', icon: CalendarDays },
   { label: 'Ingresos Totales', value: 'S/ 63,800', extra: '+28% vs trimestre anterior', color: 'bg-purple-500', icon: TrendingUp },
-  { label: 'Índice de Satisfacción', value: '94%', extra: '-2% vs mes anterior', color: 'bg-orange-500', icon: Activity },
+  { label: 'Índice de Satisfacción', value: '0%', extra: 'Desde API', color: 'bg-orange-500', icon: Activity },
 ]
 
 const topMedicos = [
@@ -194,12 +197,13 @@ function AdminWorkspace({ onLogout }) {
   const { showMessage } = useAppMessage()
   const [activeView, setActiveView] = useState('dashboard')
   const [statsState, setStatsState] = useState({
-    totalPacientes: Number(statsDashboard[0].value.replace(',', '')),
-    citasHoy: Number(statsDashboard[1].value),
-    ingresosMes: 17800,
+    totalPacientes: 0,
+    citasHoy: 0,
+    ingresosMes: 0,
+    satisfaccion: 0,
   })
   const [pacientesState, setPacientesState] = useState(pacientesItems)
-  const [agendaItemsState, setAgendaItemsState] = useState(agendaItems)
+  const [agendaItemsState, setAgendaItemsState] = useState([])
   const [medicosState, setMedicosState] = useState(medicos)
   const [activeReportType, setActiveReportType] = useState('general')
   const [reportRange, setReportRange] = useState(() => {
@@ -240,7 +244,7 @@ function AdminWorkspace({ onLogout }) {
 
   const loadAdminData = async () => {
     try {
-      const response = await fetch(`${API_URL}/patient/admin/overview`)
+      const response = await apiFetch('/patient/admin/overview')
       if (!response.ok) return
       const payload = await response.json()
       if (payload.stats) {
@@ -248,6 +252,7 @@ function AdminWorkspace({ onLogout }) {
           totalPacientes: Number(payload.stats.totalPacientes ?? 0),
           citasHoy: Number(payload.stats.citasHoy ?? 0),
           ingresosMes: Number(payload.stats.ingresosMes ?? 0),
+          satisfaccion: Number(payload.stats.satisfaccion ?? 0),
         })
       }
       if (Array.isArray(payload.pacientes)) setPacientesState(payload.pacientes)
@@ -268,11 +273,57 @@ function AdminWorkspace({ onLogout }) {
     return () => window.clearInterval(intervalId)
   }, [])
 
+  const citasClasificadas = useMemo(() => {
+    const { upcoming, past } = splitAppointments(agendaItemsState)
+    const hoy = agendaItemsState.filter((c) => isTodayAppointmentDate(c.date))
+    return { upcoming, past, hoy, todas: agendaItemsState }
+  }, [agendaItemsState])
+
+  const statsReportesDynamic = useMemo(
+    () => [
+      {
+        label: 'Total Pacientes Registrados',
+        value: String(statsState.totalPacientes),
+        extra: 'Datos en vivo',
+        color: 'bg-blue-500',
+        icon: Users,
+      },
+      {
+        label: 'Citas Programadas Hoy',
+        value: String(statsState.citasHoy),
+        extra: formatLongDateEs(getTodayIso()),
+        color: 'bg-green-500',
+        icon: CalendarDays,
+      },
+      {
+        label: 'Ingresos del Mes',
+        value: `S/ ${statsState.ingresosMes.toFixed(2)}`,
+        extra: 'Pagos confirmados',
+        color: 'bg-purple-500',
+        icon: TrendingUp,
+      },
+      {
+        label: 'Índice de Satisfacción',
+        value: `${statsState.satisfaccion}%`,
+        extra: 'Citas completadas / total',
+        color: 'bg-orange-500',
+        icon: Activity,
+      },
+    ],
+    [statsState],
+  )
+
   const statsDashboardDynamic = [
     { label: 'Total Pacientes', value: statsState.totalPacientes.toString(), extra: 'Actualizado', color: 'bg-blue-500', icon: Users },
     { label: 'Crtas Hoy', value: statsState.citasHoy.toString(), extra: 'Actualizado', color: 'bg-green-500', icon: CalendarDays },
     { label: 'Ingresos Mes', value: `S/ ${statsState.ingresosMes.toFixed(2)}`, extra: 'Actualizado', color: 'bg-purple-500', icon: TrendingUp },
-    { label: 'Satisfacción', value: '94%', extra: '+2%', color: 'bg-orange-500', icon: Activity },
+    {
+      label: 'Satisfacción',
+      value: `${statsState.satisfaccion}%`,
+      extra: 'Citas completadas / total',
+      color: 'bg-orange-500',
+      icon: Activity,
+    },
   ]
 
   const headerData = useMemo(() => {
@@ -381,8 +432,12 @@ function AdminWorkspace({ onLogout }) {
 
   const handleGuardarEdicionCita = async () => {
     if (!editingCitaId) return
+    if (editCitaForm.date && isPastIsoDate(editCitaForm.date)) {
+      showMessage('La fecha no puede ser anterior al día actual.', { variant: 'warning' })
+      return
+    }
     try {
-      const response = await fetch(`${API_URL}/patient/appointments/${editingCitaId}/update`, {
+      const response = await apiFetch(`/patient/appointments/${editingCitaId}/update`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -430,7 +485,10 @@ function AdminWorkspace({ onLogout }) {
           </div>
           <button
             type="button"
-            onClick={onLogout}
+            onClick={() => {
+              clearSession()
+              onLogout()
+            }}
             className="flex items-center gap-2 text-sm font-semibold text-white/90 hover:text-white"
           >
             <LogOut className="h-4 w-4" />
@@ -580,13 +638,20 @@ function AdminWorkspace({ onLogout }) {
             <section className="grid grid-cols-[1fr_1.9fr] gap-4">
               <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
                 <h3 className="text-2xl font-semibold">Calendario</h3>
-                <div className="mt-3 rounded-lg border border-slate-300 px-3 py-2 text-sm">30/04/2026</div>
-                <p className="mt-3 text-sm text-slate-500">Citas del día: 4</p>
+                <div className="mt-3 rounded-lg border border-slate-300 px-3 py-2 text-sm">
+                  {formatLongDateEs(getTodayIso())}
+                </div>
+                <p className="mt-3 text-sm text-slate-500">
+                  Citas del día: {citasClasificadas.hoy.length}
+                </p>
                 <div className="mt-2 grid grid-cols-2 gap-1">
-                  {agendaCalendarItems.map((item) => (
-                    <div key={item.patient} className="rounded bg-[#eef2fb] px-2 py-1.5">
+                  {citasClasificadas.hoy.length === 0 ? (
+                    <p className="col-span-2 text-xs text-slate-500">Sin citas para hoy.</p>
+                  ) : null}
+                  {citasClasificadas.hoy.map((item) => (
+                    <div key={item.id} className="rounded bg-[#eef2fb] px-2 py-1.5">
                       <p className="text-sm font-semibold">{item.patient}</p>
-                      <p className="text-xs text-slate-600">{item.specialty}</p>
+                      <p className="text-xs text-slate-600">{item.hour}</p>
                     </div>
                   ))}
                 </div>
@@ -702,6 +767,7 @@ function AdminWorkspace({ onLogout }) {
                       <label className="mb-1 block text-xs font-semibold text-slate-500">Fecha de cita</label>
                       <input
                         type="date"
+                        min={getTodayIso()}
                         value={nuevaCitaAdmin.fecha}
                         onChange={(event) => setNuevaCitaAdmin((prev) => ({ ...prev, fecha: event.target.value }))}
                         className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
@@ -745,14 +811,12 @@ function AdminWorkspace({ onLogout }) {
                         )
                         return
                       }
-                      const today = new Date()
-                      const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
-                      if (fecha < todayIso) {
+                      if (isPastIsoDate(fecha)) {
                         showMessage('La fecha no puede ser anterior al día actual.', { variant: 'warning' })
                         return
                       }
                       try {
-                        const response = await fetch(`${API_URL}/patient/admin/citas/by-dni/${dni}`, {
+                        const response = await apiFetch(`/patient/admin/citas/by-dni/${dni}`, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({
@@ -796,8 +860,12 @@ function AdminWorkspace({ onLogout }) {
 
                 <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
                   <h3 className="text-2xl font-semibold">Citas registradas</h3>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Hoy ({formatLongDateEs(getTodayIso())}): {citasClasificadas.hoy.length} · Próximas:{' '}
+                    {citasClasificadas.upcoming.length} · Anteriores: {citasClasificadas.past.length}
+                  </p>
                   <div className="mt-3 space-y-3">
-                    {agendaItemsState.map((item) => (
+                    {[...citasClasificadas.upcoming, ...citasClasificadas.past].map((item) => (
                       <div key={item.id} className="rounded-lg border border-slate-200 px-3 py-3">
                         <div className="flex items-start justify-between">
                           <div className="flex items-start gap-3">
@@ -811,8 +879,16 @@ function AdminWorkspace({ onLogout }) {
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
-                            <span className={`rounded-full px-2 py-0.5 text-xs ${item.status === 'Pendiente' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                              {item.status}
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-xs ${
+                                !isUpcomingAppointment(item)
+                                  ? 'bg-slate-100 text-slate-600'
+                                  : item.status === 'Pendiente'
+                                    ? 'bg-amber-100 text-amber-700'
+                                    : 'bg-emerald-100 text-emerald-700'
+                              }`}
+                            >
+                              {!isUpcomingAppointment(item) ? `${item.status} · pasada` : item.status}
                             </span>
                             <button type="button" onClick={() => handleVerCita(item)} className="text-sm font-semibold">
                               Ver
@@ -836,6 +912,7 @@ function AdminWorkspace({ onLogout }) {
                           <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg border border-slate-200 bg-white p-3">
                             <input
                               type="date"
+                              min={getTodayIso()}
                               value={editCitaForm.date}
                               onChange={(event) => setEditCitaForm((prev) => ({ ...prev, date: event.target.value }))}
                               className="rounded border border-slate-300 px-2 py-1.5 text-sm"
@@ -961,7 +1038,7 @@ function AdminWorkspace({ onLogout }) {
           {activeView === 'reportes' ? (
             <section className="space-y-4 pb-6">
               <section className="grid grid-cols-4 gap-3">
-                {statsReportes.map((card) => {
+                {statsReportesDynamic.map((card) => {
                   const Icon = card.icon
                   return (
                     <div key={card.label} className="rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">

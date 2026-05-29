@@ -7,7 +7,6 @@ function LoginPanel({
   onSubmit,
   onCreatePacienteAccount,
   onForgotPacienteAccount,
-  onStaffAccountInfo,
 }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -57,7 +56,7 @@ function LoginPanel({
             onClick={onForgotPacienteAccount}
             className="text-blue-500 hover:underline"
           >
-            ¿Olvidaste tu cuenta?
+            ¿Olvidaste tu contraseña?
           </button>
         ) : null}
       </div>
@@ -80,20 +79,8 @@ function LoginPanel({
         {isLoading ? 'Validando...' : selectedProfile.cta}
       </button>
 
-      <div className="mt-5 border-t border-slate-200 pt-5 text-center text-xs text-slate-500">
-        <ShieldCheck className="mx-auto mb-1 h-4 w-4" />
-        {selectedProfile.key === 'PACIENTE'
-          ? 'Paciente: usa cuentas BD paciente1/paciente1 ... paciente5/paciente5.'
-          : `Cuenta única: ${selectedProfile.key.toLowerCase()} / ${selectedProfile.key.toLowerCase()}`}
-        {selectedProfile.key !== 'PACIENTE' && onStaffAccountInfo ? (
-          <button
-            type="button"
-            onClick={onStaffAccountInfo}
-            className="mt-2 block w-full text-[11px] font-semibold text-slate-600 underline decoration-slate-400 hover:text-slate-800"
-          >
-            Información sobre acceso y cuentas de este perfil
-          </button>
-        ) : null}
+      <div className="mt-5 border-t border-slate-200 pt-5 text-center">
+        <ShieldCheck className="mx-auto h-4 w-4 text-slate-400" />
       </div>
     </form>
   )

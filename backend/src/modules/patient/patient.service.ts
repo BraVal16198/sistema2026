@@ -1,6 +1,12 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
+import {
+  COSTO_POR_ESPECIALIDAD,
+  HORARIOS_CITAS,
+  MEDICO_ESPECIALIDADES,
+  METODOS_PAGO,
+} from '../../common/catalog';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
 import { SaveClinicalRecordDto } from './dto/save-clinical-record.dto';
 import { UpdateAppointmentDto } from './dto/update-appointment.dto';
@@ -8,13 +14,6 @@ import { AppointmentEntity } from './entities/appointment.entity';
 import { HistoryEntryEntity } from './entities/history-entry.entity';
 import { PatientProfileEntity } from './entities/patient-profile.entity';
 import { PaymentEntity } from './entities/payment.entity';
-
-const COSTO_POR_ESPECIALIDAD: Record<string, number> = {
-  'Medicina General': 80,
-  Cardiología: 120,
-  Pediatría: 95,
-  Traumatología: 150,
-};
 
 @Injectable()
 export class PatientService {
@@ -30,11 +29,34 @@ export class PatientService {
   ) {}
 
   private formatLongDateEs(dateIso: string) {
-    return new Date(dateIso).toLocaleDateString('es-PE', {
+    const parsed = this.parseAppointmentDate(dateIso);
+    if (!parsed) return dateIso;
+    return parsed.toLocaleDateString('es-PE', {
       day: '2-digit',
       month: 'long',
       year: 'numeric',
     });
+  }
+
+  private formatDateFromIso(dateIso: string) {
+    return this.formatLongDateEs(dateIso);
+  }
+
+  private assertAppointmentDateNotPast(dateIso: string) {
+    const s = String(dateIso ?? '').trim();
+    const todayIso = this.getTodayIso();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s) && s < todayIso) {
+      throw new BadRequestException('No se pueden agendar citas en fechas pasadas');
+    }
+    const d = this.parseAppointmentDate(s);
+    if (!d) {
+      throw new BadRequestException('Fecha de cita inválida');
+    }
+    const day = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const today = this.startOfToday();
+    if (day.getTime() < today.getTime()) {
+      throw new BadRequestException('No se pueden agendar citas en fechas pasadas');
+    }
   }
 
   private getTodayIso() {
@@ -45,12 +67,139 @@ export class PatientService {
     return `${year}-${month}-${day}`;
   }
 
+  private parseAppointmentDate(dateStr: string): Date | null {
+    const s = String(dateStr ?? '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      const [y, m, d] = s.split('-').map(Number);
+      return new Date(y, m - 1, d);
+    }
+    const months: Record<string, number> = {
+      enero: 0,
+      febrero: 1,
+      marzo: 2,
+      abril: 3,
+      mayo: 4,
+      junio: 5,
+      julio: 6,
+      agosto: 7,
+      septiembre: 8,
+      setiembre: 8,
+      octubre: 9,
+      noviembre: 10,
+      diciembre: 11,
+    };
+    const match = s.match(/^(\d{1,2})\s+de\s+([a-záéíóúñ]+)\s+de\s+(\d{4})$/i);
+    if (match) {
+      const month = months[match[2].toLowerCase()];
+      if (month === undefined) return null;
+      return new Date(Number(match[3]), month, Number(match[1]));
+    }
+    const fallback = new Date(s);
+    return Number.isNaN(fallback.getTime()) ? null : fallback;
+  }
+
+  private startOfToday(): Date {
+    const t = new Date();
+    t.setHours(0, 0, 0, 0);
+    return t;
+  }
+
+  private addDaysIso(dateIso: string, days: number): string {
+    const base = this.parseAppointmentDate(dateIso);
+    if (!base) return dateIso;
+    base.setDate(base.getDate() + days);
+    const y = base.getFullYear();
+    const m = String(base.getMonth() + 1).padStart(2, '0');
+    const d = String(base.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  private isUpcomingAppointment(appointment: AppointmentEntity): boolean {
+    const status = String(appointment.status ?? '').trim();
+    if (status === 'Completada' || status === 'Cancelada') return false;
+    const d = this.parseAppointmentDate(appointment.date);
+    if (!d) return false;
+    d.setHours(0, 0, 0, 0);
+    return d.getTime() >= this.startOfToday().getTime();
+  }
+
+  private splitAppointments(appointments: AppointmentEntity[]) {
+    const upcoming: AppointmentEntity[] = [];
+    const past: AppointmentEntity[] = [];
+    for (const apt of appointments) {
+      if (this.isUpcomingAppointment(apt)) upcoming.push(apt);
+      else past.push(apt);
+    }
+    const compareAsc = (a: AppointmentEntity, b: AppointmentEntity) => {
+      const ta = this.parseAppointmentDate(a.date)?.getTime() ?? 0;
+      const tb = this.parseAppointmentDate(b.date)?.getTime() ?? 0;
+      return ta - tb;
+    };
+    upcoming.sort(compareAsc);
+    past.sort((a, b) => compareAsc(b, a));
+    return { upcoming, past };
+  }
+
+  private calcAge(birthDate?: string | null) {
+    if (!birthDate) return '--';
+    const birth = this.parseAppointmentDate(birthDate) ?? new Date(birthDate);
+    if (Number.isNaN(birth.getTime())) return '--';
+    const now = new Date();
+    let years = now.getFullYear() - birth.getFullYear();
+    const m = now.getMonth() - birth.getMonth();
+    if (m < 0 || (m === 0 && now.getDate() < birth.getDate())) years -= 1;
+    return years >= 0 ? `${years} años` : '--';
+  }
+
+  getCatalog() {
+    return {
+      medicosEspecialidades: MEDICO_ESPECIALIDADES.map((item) => ({
+        value: item.value,
+        label: item.value,
+        doctor: item.doctor,
+        specialty: item.specialty,
+      })),
+      horariosCitas: [...HORARIOS_CITAS],
+      metodosPago: [...METODOS_PAGO],
+      costosPorEspecialidad: COSTO_POR_ESPECIALIDAD,
+      incrementos: [
+        { id: 1, meta: 'Registro de clientes y consulta', valor: 'Login, registro y portal paciente' },
+        { id: 2, meta: 'Programación de citas médicas', valor: 'Citas desde paciente, caja y admin' },
+        { id: 3, meta: 'Integración de pagos y facturación', valor: 'Cobros en caja y portal paciente' },
+        { id: 4, meta: 'Validación y ensamblado final', valor: 'Historia clínica, médico y reportes PDF' },
+      ],
+    };
+  }
+
+  private async resolveProfile(username: string) {
+    await this.ensureGlobalSeed();
+    const normalized = username.trim().toLowerCase();
+    let profile = await this.profileRepo.findOne({ where: { username: normalized } });
+
+    if (!profile) {
+      if (normalized === 'paciente') {
+        return this.ensureSeed('paciente');
+      }
+      throw new NotFoundException(
+        `No existe perfil clínico para "${normalized}". Regístrate como paciente primero.`,
+      );
+    }
+
+    if (normalized === 'paciente') {
+      await this.ensureSeed('paciente');
+      profile = await this.profileRepo.findOne({ where: { username: normalized } });
+    }
+
+    return profile!;
+  }
+
   private async ensureGlobalSeed() {
     const todayIso = this.getTodayIso();
-    const tomorrow = new Date(todayIso);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowIso = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
-    const todayShort = new Date(todayIso).toLocaleDateString('es-PE');
+    const tomorrowIso = this.addDaysIso(todayIso, 1);
+    const todayParsed = this.parseAppointmentDate(todayIso);
+    const todayShort = todayParsed
+      ? todayParsed.toLocaleDateString('es-PE')
+      : new Date().toLocaleDateString('es-PE');
 
     const seedPatients = [
       {
@@ -246,10 +395,12 @@ export class PatientService {
       where: { patientProfile: { id: profile.id } },
     });
     if (!existingAppointments) {
+      const todayIso = this.getTodayIso();
+      const tomorrowIso = this.addDaysIso(todayIso, 1);
       await this.appointmentRepo.save([
         this.appointmentRepo.create({
           patientProfile: profile,
-          date: '14 de mayo de 2026',
+          date: this.formatLongDateEs(todayIso),
           time: '10:00 AM',
           doctor: 'Dr. Juan Pérez',
           specialty: 'Medicina General',
@@ -262,7 +413,7 @@ export class PatientService {
         }),
         this.appointmentRepo.create({
           patientProfile: profile,
-          date: '09 de junio de 2026',
+          date: this.formatLongDateEs(tomorrowIso),
           time: '02:30 PM',
           doctor: 'Dra. Ana Torres',
           specialty: 'Cardiología',
@@ -408,23 +559,25 @@ export class PatientService {
       where: { patientProfile: { id: profileId }, status: 'Pendiente' },
     });
 
-    const expiredIds = expired
-      .filter((item) => item.holdExpiresAt && now >= Number(item.holdExpiresAt))
+    const expiredPayments = expired.filter(
+      (item) => item.holdExpiresAt && now >= Number(item.holdExpiresAt),
+    );
+    const expiredIds = expiredPayments
       .map((item) => item.appointmentId)
       .filter((value): value is string => Boolean(value));
 
-    if (!expiredIds.length) return;
+    if (!expiredPayments.length) return;
 
     await this.paymentRepo.delete({
-      patientProfile: { id: profileId },
-      status: 'Pendiente',
+      id: In(expiredPayments.map((item) => item.id)),
     });
-    await this.appointmentRepo.delete(expiredIds);
+    if (expiredIds.length) {
+      await this.appointmentRepo.delete({ id: In(expiredIds) });
+    }
   }
 
   async getState(username: string) {
-    await this.ensureGlobalSeed();
-    const profile = await this.ensureSeed(username);
+    const profile = await this.resolveProfile(username);
     await this.cleanupExpired(profile.id);
 
     const [appointments, pendingPayments, paidPayments, history] = await Promise.all([
@@ -446,6 +599,8 @@ export class PatientService {
       }),
     ]);
 
+    const { upcoming, past } = this.splitAppointments(appointments);
+
     return {
       profile: {
         username: profile.username,
@@ -461,7 +616,8 @@ export class PatientService {
         enfermedadesCronicas: profile.chronicDiseases,
         medicacionActual: profile.currentMedication,
       },
-      proximasCitas: appointments,
+      proximasCitas: upcoming,
+      citasAnteriores: past,
       historialConsultas: history,
       pagosPendientes: pendingPayments.map((item) => ({
         ...item,
@@ -479,20 +635,18 @@ export class PatientService {
   }
 
   async createAppointment(username: string, dto: CreateAppointmentDto) {
-    const profile = await this.ensureSeed(username);
+    const profile = await this.resolveProfile(username);
+    this.assertAppointmentDateNotPast(dto.fecha);
     const selectedDoctor = dto.medicoEspecialidad;
     const [doctor = '', specialty = 'General'] = selectedDoctor.split(' - ');
     const amount = COSTO_POR_ESPECIALIDAD[specialty] ?? 80;
     const holdExpiresAt = Date.now() + 4 * 60 * 1000;
+    const fechaCita = this.formatDateFromIso(dto.fecha);
 
     const appointment = await this.appointmentRepo.save(
       this.appointmentRepo.create({
         patientProfile: profile,
-        date: new Date(dto.fecha).toLocaleDateString('es-PE', {
-          day: '2-digit',
-          month: 'long',
-          year: 'numeric',
-        }),
+        date: fechaCita,
         time: dto.hora,
         doctor,
         specialty,
@@ -523,11 +677,7 @@ export class PatientService {
     await this.historyRepo.save(
       this.historyRepo.create({
         patientProfile: profile,
-        date: new Date(dto.fecha).toLocaleDateString('es-PE', {
-          day: '2-digit',
-          month: 'long',
-          year: 'numeric',
-        }),
+        date: fechaCita,
         doctor: selectedDoctor,
         specialty,
         motivo: dto.motivo,
@@ -543,7 +693,7 @@ export class PatientService {
   }
 
   async payPending(username: string, paymentId: string) {
-    const profile = await this.ensureSeed(username);
+    const profile = await this.resolveProfile(username);
     const payment = await this.paymentRepo.findOne({
       where: { id: paymentId, patientProfile: { id: profile.id }, status: 'Pendiente' },
     });
@@ -571,7 +721,7 @@ export class PatientService {
   }
 
   async cancelAppointment(username: string, appointmentId: string) {
-    const profile = await this.ensureSeed(username);
+    const profile = await this.resolveProfile(username);
     await this.appointmentRepo.delete({
       id: appointmentId,
       patientProfile: { id: profile.id },
@@ -632,19 +782,17 @@ export class PatientService {
 
   async createAppointmentByDni(dni: string, dto: CreateAppointmentDto) {
     const profile = await this.ensureProfileByDni(dni, dto);
+    this.assertAppointmentDateNotPast(dto.fecha);
     const selectedDoctor = dto.medicoEspecialidad;
     const [doctor = '', specialty = 'General'] = selectedDoctor.split(' - ');
     const amount = COSTO_POR_ESPECIALIDAD[specialty] ?? 80;
     const holdExpiresAt = Date.now() + 4 * 60 * 1000;
+    const fechaCita = this.formatDateFromIso(dto.fecha);
 
     await this.appointmentRepo.save(
       this.appointmentRepo.create({
         patientProfile: profile,
-        date: new Date(dto.fecha).toLocaleDateString('es-PE', {
-          day: '2-digit',
-          month: 'long',
-          year: 'numeric',
-        }),
+        date: fechaCita,
         time: dto.hora,
         doctor,
         specialty,
@@ -680,11 +828,7 @@ export class PatientService {
     await this.historyRepo.save(
       this.historyRepo.create({
         patientProfile: profile,
-        date: new Date(dto.fecha).toLocaleDateString('es-PE', {
-          day: '2-digit',
-          month: 'long',
-          year: 'numeric',
-        }),
+        date: fechaCita,
         doctor: selectedDoctor,
         specialty,
         motivo: dto.motivo,
@@ -745,11 +889,8 @@ export class PatientService {
     const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
     const endOfDay = startOfDay + 24 * 60 * 60 * 1000;
 
-    const citasDelDia = appointments.filter((item) => {
-      if (!item.createdAt) return false;
-      const createdAt = Number(item.createdAt);
-      return createdAt >= startOfDay && createdAt < endOfDay;
-    });
+    const todayFormatted = this.formatLongDateEs(this.getTodayIso());
+    const citasDelDia = appointments.filter((item) => item.date === todayFormatted);
     const pagosDelDia = paid.filter((item) => {
       if (!item.createdAt) return false;
       const createdAt = Number(item.createdAt);
@@ -808,18 +949,28 @@ export class PatientService {
       .filter((item) => item.status === 'Pagado')
       .reduce((acc, item) => acc + Number(item.amount), 0);
 
+    const todayFormatted = this.formatLongDateEs(this.getTodayIso());
+    const citasHoy = appointments.filter((item) => item.date === todayFormatted).length;
+    const citasCompletadas = appointments.filter((item) => item.status === 'Completada').length;
+    const satisfaccion =
+      appointments.length > 0
+        ? Math.round((citasCompletadas / appointments.length) * 100)
+        : 0;
+
     return {
       stats: {
         totalPacientes: profiles.length,
-        citasHoy: appointments.filter((item) => item.status === 'Confirmada' || item.status === 'Completada')
-          .length,
+        citasHoy,
         ingresosMes: ingresos,
+        satisfaccion,
+        citasCompletadas,
+        citasTotales: appointments.length,
       },
       pacientes: profiles.map((p) => ({
         dni: p.dni,
         fullName: p.fullName,
-        age: '--',
-        phone: '--',
+        age: this.calcAge(p.birthDate),
+        phone: p.phone ?? '--',
         lastVisit: appointments.find((a) => a.patientProfile.id === p.id)?.date ?? '--',
       })),
       citas: appointments.map((a) => ({
@@ -841,16 +992,21 @@ export class PatientService {
       specialty,
     };
 
-    const [appointmentsAll, history] = await Promise.all([
+    const [appointmentsAll, historyAll] = await Promise.all([
       this.appointmentRepo.find({
         where: whereBase,
         order: { createdAt: 'DESC' },
       }),
       this.historyRepo.find({
-        where: { doctor: `${doctor} - ${specialty}` },
         order: { createdAt: 'DESC' },
       }),
     ]);
+
+    const history = historyAll.filter(
+      (item) =>
+        item.specialty === specialty ||
+        String(item.doctor ?? '').includes(doctor),
+    );
 
     const appointmentsDay = formattedDate
       ? appointmentsAll.filter((item) => item.date === formattedDate)
@@ -930,6 +1086,9 @@ export class PatientService {
     appointment.status = dto.status;
     if (dto.date) {
       const looksIso = /^\d{4}-\d{2}-\d{2}$/.test(dto.date);
+      if (looksIso) {
+        this.assertAppointmentDateNotPast(dto.date);
+      }
       appointment.date = looksIso ? this.formatLongDateEs(dto.date) : dto.date;
     }
     if (dto.hour) {
@@ -937,11 +1096,16 @@ export class PatientService {
     }
 
     if (dto.status === 'Confirmada' || dto.status === 'Completada') {
-      appointment.paymentStatus = 'PAGADO';
-      appointment.holdExpiresAt = null;
+      const payment = await this.paymentRepo.findOne({
+        where: { appointmentId: appointment.id },
+      });
+      if (payment?.status === 'Pagado') {
+        appointment.paymentStatus = 'PAGADO';
+        appointment.holdExpiresAt = null;
+      }
     }
 
     await this.appointmentRepo.save(appointment);
-    return { ok: true };
+    return { ok: true, appointment };
   }
 }

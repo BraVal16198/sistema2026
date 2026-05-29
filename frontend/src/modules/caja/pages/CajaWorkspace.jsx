@@ -12,7 +12,8 @@ import { jsPDF } from 'jspdf'
 import { useEffect, useMemo, useState } from 'react'
 import { useAppMessage } from '../../../context/AppMessageContext'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000'
+import { apiFetch } from '../../../lib/api'
+import { getTodayIso, isPastIsoDate } from '../../../lib/appointmentDates'
 
 const NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard', icon: CalendarDays },
@@ -66,11 +67,6 @@ const calcularEdad = (fechaNacimiento) => {
   return edad >= 0 ? String(edad) : ''
 }
 
-const getTodayIso = () => {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-
 const toIsoFromEpoch = (value) => {
   if (!value) return ''
   const d = new Date(Number(value))
@@ -91,8 +87,21 @@ function CajaWorkspace({ onLogout }) {
   })
   const [pacientesConCitaDia, setPacientesConCitaDia] = useState([])
   const [reportDate] = useState(getTodayIso())
-  const [cajaCerradaHoy, setCajaCerradaHoy] = useState(false)
-  const [resumenCierre, setResumenCierre] = useState(null)
+  const [cajaCerradaHoy, setCajaCerradaHoy] = useState(() => {
+    try {
+      return Boolean(localStorage.getItem(`cajaCierreDia:${getTodayIso()}`))
+    } catch {
+      return false
+    }
+  })
+  const [resumenCierre, setResumenCierre] = useState(() => {
+    try {
+      const raw = localStorage.getItem(`cajaCierreDia:${getTodayIso()}`)
+      return raw ? JSON.parse(raw) : null
+    } catch {
+      return null
+    }
+  })
   const [nuevaCitaCaja, setNuevaCitaCaja] = useState({
     dni: '',
     nombres: '',
@@ -109,7 +118,7 @@ function CajaWorkspace({ onLogout }) {
 
   const loadCajaData = async () => {
     try {
-      const response = await fetch(`${API_URL}/patient/caja/overview`)
+      const response = await apiFetch('/patient/caja/overview')
       if (!response.ok) return
       const payload = await response.json()
       setPagosPendientesState(Array.isArray(payload.pagosPendientes) ? payload.pagosPendientes : [])
@@ -262,14 +271,31 @@ function CajaWorkspace({ onLogout }) {
     }
     const hoy = new Date()
     const fecha = `${String(hoy.getDate()).padStart(2, '0')}/${String(hoy.getMonth() + 1).padStart(2, '0')}/${hoy.getFullYear()}`
-    setResumenCierre({
+    const resumen = {
       fecha,
       citasCreadas: statsDia.citasCreadas,
       pagosCompletados: statsDia.pagosCompletados,
       totalRecaudado: statsDia.totalRecaudado,
-    })
+    }
+    setResumenCierre(resumen)
     setCajaCerradaHoy(true)
+    try {
+      localStorage.setItem(`cajaCierreDia:${getTodayIso()}`, JSON.stringify(resumen))
+    } catch {
+      // ignore
+    }
     showMessage('Caja cerrada correctamente para el día de hoy.', { variant: 'success' })
+  }
+
+  const reabrirCajaDelDia = () => {
+    setCajaCerradaHoy(false)
+    setResumenCierre(null)
+    try {
+      localStorage.removeItem(`cajaCierreDia:${getTodayIso()}`)
+    } catch {
+      // ignore
+    }
+    showMessage('Caja reabierta. Ya puedes crear citas y registrar pagos.', { variant: 'success' })
   }
 
   return (
@@ -326,6 +352,23 @@ function CajaWorkspace({ onLogout }) {
               {headerData.actionLabel}
             </button>
           </header>
+
+          {cajaCerradaHoy ? (
+            <div className="mb-4 flex items-center justify-between rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <p>
+                <span className="font-semibold">Caja cerrada para hoy.</span> No puedes crear citas ni registrar pagos
+                hasta reabrirla.
+              </p>
+              <button
+                type="button"
+                onClick={reabrirCajaDelDia}
+                className="shrink-0 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
+              >
+                Reabrir caja
+              </button>
+            </div>
+          ) : null}
+
           {activeView === 'facturacion' ? (
             <section className="grid grid-cols-[1fr_1.9fr] gap-4">
               <article className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -477,6 +520,7 @@ function CajaWorkspace({ onLogout }) {
                     <label className="mb-1 block text-xs font-semibold text-slate-500">Fecha de cita</label>
                     <input
                       type="date"
+                      min={getTodayIso()}
                       value={nuevaCitaCaja.fecha}
                       onChange={(event) =>
                         setNuevaCitaCaja((prev) => ({ ...prev, fecha: event.target.value }))
@@ -523,14 +567,12 @@ function CajaWorkspace({ onLogout }) {
                       )
                       return
                     }
-                    const today = new Date()
-                    const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
-                    if (fecha < todayIso) {
-                      showMessage('La fecha no puede ser anterior al día actual.', { variant: 'warning' })
+                    if (isPastIsoDate(fecha)) {
+                      showMessage('La fecha de la cita no puede ser anterior a hoy.', { variant: 'warning' })
                       return
                     }
                     try {
-                      const response = await fetch(`${API_URL}/patient/caja/citas/by-dni/${dni}`, {
+                      const response = await apiFetch(`/patient/caja/citas/by-dni/${dni}`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -572,7 +614,7 @@ function CajaWorkspace({ onLogout }) {
                   }}
                   className="mt-3 rounded-lg bg-[#2463eb] px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  Crear Cita
+                  {cajaCerradaHoy ? 'Caja cerrada — no se puede crear' : 'Crear Cita'}
                 </button>
               </article>
             </section>
@@ -601,7 +643,7 @@ function CajaWorkspace({ onLogout }) {
                                   })
                                   return
                                 }
-                                const response = await fetch(`${API_URL}/patient/caja/pagos/${item.id}/pagar`, {
+                                const response = await apiFetch(`/patient/caja/pagos/${item.id}/pagar`, {
                                   method: 'POST',
                                 })
                                 if (!response.ok) {
@@ -731,11 +773,10 @@ function CajaWorkspace({ onLogout }) {
                   </button>
                   <button
                     type="button"
-                    onClick={cerrarCajaDelDia}
-                    disabled={cajaCerradaHoy}
+                    onClick={cajaCerradaHoy ? reabrirCajaDelDia : cerrarCajaDelDia}
                     className="rounded-lg bg-[#0f766e] px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    {cajaCerradaHoy ? 'Caja cerrada' : 'Cerrar caja del día'}
+                    {cajaCerradaHoy ? 'Reabrir caja del día' : 'Cerrar caja del día'}
                   </button>
                 </div>
               </div>

@@ -9,7 +9,8 @@ import PacienteWorkspace from '../../paciente/pages/PacienteWorkspace'
 import AdminWorkspace from '../../admin/pages/AdminWorkspace'
 import CajaWorkspace from '../../caja/pages/CajaWorkspace'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000'
+import { apiFetch } from '../../../lib/api'
+import { clearSession } from '../../../lib/session'
 
 const profileSnapshotKey = (username) => `pacienteProfileSnapshot:${String(username).trim().toLowerCase()}`
 
@@ -35,6 +36,9 @@ function LoginPage() {
     password: '',
   })
   const [recoverDni, setRecoverDni] = useState('')
+  const [recoverResult, setRecoverResult] = useState(null)
+  const [recoverNewPassword, setRecoverNewPassword] = useState('')
+  const [recoverConfirmPassword, setRecoverConfirmPassword] = useState('')
 
   const selectedProfile = useMemo(
     () => PROFILE_OPTIONS.find((item) => item.key === selectedProfileKey) ?? PROFILE_OPTIONS[0],
@@ -53,7 +57,7 @@ function LoginPage() {
     }
 
     try {
-      const response = await fetch(`${API_URL}/auth/login`, {
+      const response = await apiFetch('/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -105,6 +109,8 @@ function LoginPage() {
   const handleCreatePacienteAccount = () => {
     if (selectedProfile.key !== 'PACIENTE') return
     setShowRecoverPacienteForm(false)
+    setRecoverResult(null)
+    setRecoverDni('')
     setShowCreatePacienteForm((prev) => !prev)
   }
 
@@ -141,7 +147,7 @@ function LoginPage() {
     }
 
     try {
-      const response = await fetch(`${API_URL}/auth/paciente/register`, {
+      const response = await apiFetch('/auth/paciente/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -202,20 +208,11 @@ function LoginPage() {
   const handleForgotPacienteAccount = () => {
     if (selectedProfile.key !== 'PACIENTE') return
     setShowCreatePacienteForm(false)
+    setRecoverResult(null)
+    setRecoverDni('')
+    setRecoverNewPassword('')
+    setRecoverConfirmPassword('')
     setShowRecoverPacienteForm((prev) => !prev)
-  }
-
-  const handleStaffAccountInfo = () => {
-    const roleLabel =
-      selectedProfile.key === 'MEDICO'
-        ? 'Médico'
-        : selectedProfile.key === 'CAJA'
-          ? 'Caja'
-          : 'Administrador'
-    showMessage(
-      `${roleLabel}: en entorno de prueba el usuario y la contraseña coinciden con el nombre del perfil en minúsculas (por ejemplo: medico / medico, caja / caja, administrador / administrador). Las cuentas reales las gestiona el administrador del sistema.`,
-      { variant: 'info', title: 'Información' },
-    )
   }
 
   const handleSubmitRecoverPacienteAccount = async () => {
@@ -225,7 +222,7 @@ function LoginPage() {
     }
 
     try {
-      const response = await fetch(`${API_URL}/auth/paciente/recover`, {
+      const response = await apiFetch('/auth/paciente/recover', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dni: recoverDni }),
@@ -238,25 +235,74 @@ function LoginPage() {
             ? data.message
             : Array.isArray(data.message)
               ? data.message.join(' ')
-              : 'No se pudo recuperar la cuenta.'
-        showMessage(msg, { variant: 'warning' })
+              : 'No se encontró ninguna cuenta con ese DNI.'
+        setRecoverResult({ ok: false, msg })
         return
       }
 
-      showMessage(`Cuenta encontrada: usuario "${data.username}" (${data.paciente}).`, {
+      setRecoverResult({ ok: true, username: data.username, paciente: data.paciente })
+    } catch {
+      setRecoverResult({ ok: false, msg: 'No se pudo conectar con el servidor.' })
+    }
+  }
+
+  const handleSubmitResetPassword = async () => {
+    if (!recoverDni || recoverDni.length !== 8) {
+      showMessage('Ingresa un DNI válido de 8 dígitos.', { variant: 'warning' })
+      return
+    }
+    if (recoverNewPassword.length < 4) {
+      showMessage('La nueva contraseña debe tener al menos 4 caracteres.', { variant: 'warning' })
+      return
+    }
+    if (recoverNewPassword !== recoverConfirmPassword) {
+      showMessage('Las contraseñas no coinciden.', { variant: 'warning' })
+      return
+    }
+
+    try {
+      const response = await apiFetch('/auth/paciente/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dni: recoverDni, password: recoverNewPassword }),
+      })
+
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        const msg =
+          typeof data.message === 'string'
+            ? data.message
+            : Array.isArray(data.message)
+              ? data.message.join(' ')
+              : 'No se pudo restablecer la contraseña.'
+        showMessage(msg, { variant: 'error' })
+        return
+      }
+
+      showMessage(`Contraseña actualizada para "${data.username}". Ya puedes iniciar sesión.`, {
         variant: 'success',
       })
       setShowRecoverPacienteForm(false)
+      setRecoverResult(null)
       setRecoverDni('')
+      setRecoverNewPassword('')
+      setRecoverConfirmPassword('')
     } catch {
-      showMessage('No se pudo recuperar la cuenta. Verifica conexión con el servidor.', {
+      showMessage('No se pudo restablecer la contraseña. Verifica conexión con el servidor.', {
         variant: 'error',
       })
     }
   }
 
   if (isMedicoView) {
-    return <MedicoWorkspace onLogout={() => setIsMedicoView(false)} />
+    return (
+      <MedicoWorkspace
+        onLogout={() => {
+          clearSession()
+          setIsMedicoView(false)
+        }}
+      />
+    )
   }
 
   if (isPacienteView) {
@@ -267,6 +313,7 @@ function LoginPage() {
         key={portalKey}
         portalUsername={portalKey}
         onLogout={() => {
+          clearSession()
           setIsPacienteView(false)
           setPacientePortalUsername(null)
         }}
@@ -275,11 +322,25 @@ function LoginPage() {
   }
 
   if (isAdminView) {
-    return <AdminWorkspace onLogout={() => setIsAdminView(false)} />
+    return (
+      <AdminWorkspace
+        onLogout={() => {
+          clearSession()
+          setIsAdminView(false)
+        }}
+      />
+    )
   }
 
   if (isCajaView) {
-    return <CajaWorkspace onLogout={() => setIsCajaView(false)} />
+    return (
+      <CajaWorkspace
+        onLogout={() => {
+          clearSession()
+          setIsCajaView(false)
+        }}
+      />
+    )
   }
 
   return (
@@ -303,35 +364,22 @@ function LoginPage() {
         </aside>
 
         <article className="rounded-3xl bg-white p-7 shadow-2xl">
-          <h2 className="text-4xl font-bold">Iniciar Sesión</h2>
-          <p className="mt-2 text-lg text-slate-600">Selecciona tu perfil y accede al sistema</p>
-
-          <p className="mt-6 text-sm font-semibold text-slate-700">Selecciona tu perfil</p>
-          <div className="mt-3 grid grid-cols-2 gap-3">
-            {PROFILE_OPTIONS.map((option) => (
-              <ProfileCard
-                key={option.key}
-                option={option}
-                theme={THEME_BY_COLOR[option.color]}
-                isActive={selectedProfile.key === option.key}
-                onClick={() => setSelectedProfileKey(option.key)}
-              />
-            ))}
-          </div>
-
-          <LoginPanel
-            selectedProfile={selectedProfile}
-            theme={theme}
-            onSubmit={handleLogin}
-            onCreatePacienteAccount={handleCreatePacienteAccount}
-            onForgotPacienteAccount={handleForgotPacienteAccount}
-            onStaffAccountInfo={handleStaffAccountInfo}
-          />
-
-          {selectedProfile.key === 'PACIENTE' && showCreatePacienteForm ? (
-            <div className="mt-3 rounded-xl border border-blue-200 bg-blue-50 p-3">
-              <p className="text-sm font-semibold text-blue-800">Crear cuenta de Paciente</p>
-              <div className="mt-2 grid grid-cols-1 gap-2">
+          {showCreatePacienteForm ? (
+            <>
+              <div className="mb-5 flex items-start justify-between">
+                <div>
+                  <h2 className="text-3xl font-bold">Crear cuenta de Paciente</h2>
+                  <p className="mt-1 text-sm text-slate-500">Completa tus datos para registrarte en el sistema</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowCreatePacienteForm(false)}
+                  className="shrink-0 text-sm font-semibold text-blue-500 hover:underline"
+                >
+                  ← Volver
+                </button>
+              </div>
+              <div className="grid grid-cols-1 gap-2">
                 <input
                   type="text"
                   placeholder="DNI (8 dígitos)"
@@ -342,7 +390,7 @@ function LoginPage() {
                       dni: event.target.value.replace(/\D/g, '').slice(0, 8),
                     }))
                   }
-                  className="rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm"
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-400"
                 />
                 <input
                   type="text"
@@ -351,7 +399,7 @@ function LoginPage() {
                   onChange={(event) =>
                     setNewPacienteAccount((prev) => ({ ...prev, nombres: event.target.value }))
                   }
-                  className="rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm"
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-400"
                 />
                 <input
                   type="text"
@@ -363,7 +411,7 @@ function LoginPage() {
                       apellidoPaterno: event.target.value,
                     }))
                   }
-                  className="rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm"
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-400"
                 />
                 <input
                   type="text"
@@ -375,7 +423,7 @@ function LoginPage() {
                       apellidoMaterno: event.target.value,
                     }))
                   }
-                  className="rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm"
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-400"
                 />
                 <input
                   type="text"
@@ -387,7 +435,7 @@ function LoginPage() {
                       telefono: event.target.value.replace(/\D/g, '').slice(0, 9),
                     }))
                   }
-                  className="rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm"
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-400"
                 />
                 <input
                   type="date"
@@ -398,7 +446,7 @@ function LoginPage() {
                       fechaNacimiento: event.target.value,
                     }))
                   }
-                  className="rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm"
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-400"
                 />
                 <input
                   type="text"
@@ -407,7 +455,7 @@ function LoginPage() {
                   onChange={(event) =>
                     setNewPacienteAccount((prev) => ({ ...prev, username: event.target.value }))
                   }
-                  className="rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm"
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-400"
                 />
                 <input
                   type="password"
@@ -416,38 +464,129 @@ function LoginPage() {
                   onChange={(event) =>
                     setNewPacienteAccount((prev) => ({ ...prev, password: event.target.value }))
                   }
-                  className="rounded-lg border border-blue-200 bg-white px-3 py-2 text-sm"
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-400"
                 />
               </div>
               <button
                 type="button"
                 onClick={handleSubmitCreatePacienteAccount}
-                className="mt-2 w-full rounded-lg bg-blue-600 py-2 text-sm font-semibold text-white"
+                className="mt-4 w-full rounded-lg bg-blue-600 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
               >
                 Guardar cuenta
               </button>
-            </div>
-          ) : null}
+            </>
+          ) : showRecoverPacienteForm ? (
+            <>
+              <div className="mb-5 flex items-start justify-between">
+                <div>
+                  <h2 className="text-3xl font-bold">¿Olvidaste tu contraseña?</h2>
+                  <p className="mt-1 text-sm text-slate-500">Busca tu cuenta con DNI y define una nueva contraseña</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRecoverPacienteForm(false)
+                    setRecoverResult(null)
+                    setRecoverDni('')
+                    setRecoverNewPassword('')
+                    setRecoverConfirmPassword('')
+                  }}
+                  className="shrink-0 text-sm font-semibold text-amber-600 hover:underline"
+                >
+                  ← Volver
+                </button>
+              </div>
 
-          {selectedProfile.key === 'PACIENTE' && showRecoverPacienteForm ? (
-            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3">
-              <p className="text-sm font-semibold text-amber-800">Recuperar cuenta por DNI</p>
-              <input
-                type="text"
-                placeholder="DNI (8 dígitos)"
-                value={recoverDni}
-                onChange={(event) => setRecoverDni(event.target.value.replace(/\D/g, '').slice(0, 8))}
-                className="mt-2 w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm"
+              {!recoverResult ? (
+                <>
+                  <input
+                    type="text"
+                    placeholder="DNI (8 dígitos)"
+                    value={recoverDni}
+                    onChange={(event) => setRecoverDni(event.target.value.replace(/\D/g, '').slice(0, 8))}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-amber-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSubmitRecoverPacienteAccount}
+                    className="mt-3 w-full rounded-lg bg-amber-500 py-2.5 text-sm font-semibold text-white hover:bg-amber-600"
+                  >
+                    Buscar mi cuenta
+                  </button>
+                </>
+              ) : recoverResult.ok ? (
+                <div className="space-y-3">
+                  <div className="rounded-xl border border-green-200 bg-green-50 p-4 text-sm">
+                    <p className="text-lg font-bold text-green-800">Cuenta encontrada</p>
+                    <p className="mt-2 text-green-700">
+                      Paciente: <span className="font-semibold">{recoverResult.paciente}</span>
+                    </p>
+                    <p className="text-green-700">
+                      Usuario: <span className="font-semibold">{recoverResult.username}</span>
+                    </p>
+                  </div>
+                  <input
+                    type="password"
+                    placeholder="Nueva contraseña (mín. 4 caracteres)"
+                    value={recoverNewPassword}
+                    onChange={(event) => setRecoverNewPassword(event.target.value)}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-amber-400"
+                  />
+                  <input
+                    type="password"
+                    placeholder="Confirmar nueva contraseña"
+                    value={recoverConfirmPassword}
+                    onChange={(event) => setRecoverConfirmPassword(event.target.value)}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-amber-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSubmitResetPassword}
+                    className="w-full rounded-lg bg-amber-500 py-2.5 text-sm font-semibold text-white hover:bg-amber-600"
+                  >
+                    Restablecer contraseña
+                  </button>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm">
+                  <p className="font-semibold text-red-700">{recoverResult.msg}</p>
+                  <button
+                    type="button"
+                    onClick={() => setRecoverResult(null)}
+                    className="mt-3 text-sm text-red-500 underline"
+                  >
+                    Intentar con otro DNI
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <h2 className="text-4xl font-bold">Iniciar Sesión</h2>
+              <p className="mt-2 text-lg text-slate-600">Selecciona tu perfil y accede al sistema</p>
+
+              <p className="mt-6 text-sm font-semibold text-slate-700">Selecciona tu perfil</p>
+              <div className="mt-3 grid grid-cols-2 gap-3">
+                {PROFILE_OPTIONS.map((option) => (
+                  <ProfileCard
+                    key={option.key}
+                    option={option}
+                    theme={THEME_BY_COLOR[option.color]}
+                    isActive={selectedProfile.key === option.key}
+                    onClick={() => setSelectedProfileKey(option.key)}
+                  />
+                ))}
+              </div>
+
+              <LoginPanel
+                selectedProfile={selectedProfile}
+                theme={theme}
+                onSubmit={handleLogin}
+                onCreatePacienteAccount={handleCreatePacienteAccount}
+                onForgotPacienteAccount={handleForgotPacienteAccount}
               />
-              <button
-                type="button"
-                onClick={handleSubmitRecoverPacienteAccount}
-                className="mt-2 w-full rounded-lg bg-amber-600 py-2 text-sm font-semibold text-white"
-              >
-                Recuperar datos
-              </button>
-            </div>
-          ) : null}
+            </>
+          )}
         </article>
       </section>
     </main>
